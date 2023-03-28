@@ -42,7 +42,7 @@ class GCN(torch.nn.Module):
         for conv in self.convs:
             conv.reset_parameters()
 
-    def forward(self, num_nodes, z, edge_index, batch, x=None, edge_weight=None, node_id=None):
+    def forward(self, num_nodes, z, edge_index, batch, x=None, edge_weight=None, node_id=None, edge_mask=None):
         edge_index, _ = dropout_adj(edge_index, p=self.dropedge,
                                     force_undirected=True,
                                     num_nodes=num_nodes,
@@ -107,7 +107,7 @@ class SAGE(torch.nn.Module):
         for conv in self.convs:
             conv.reset_parameters()
 
-    def forward(self, num_nodes, z, edge_index, batch, x=None, edge_weight=None, node_id=None):
+    def forward(self, num_nodes, z, edge_index, batch, x=None, edge_weight=None, node_id=None, edge_mask=None):
         edge_index, _ = dropout_adj(edge_index, p=self.dropedge,
                                     force_undirected=True,
                                     num_nodes=num_nodes,
@@ -192,7 +192,7 @@ class DGCNN(torch.nn.Module):
         self.dropedge = dropedge
         self.mlp = MLP([dense_dim, 128, 1], dropout=0.5, batch_norm=False)
 
-    def forward(self, num_nodes, z, edge_index, batch, x=None, edge_weight=None, node_id=None):
+    def forward(self, num_nodes, z, edge_index, batch, x=None, edge_weight=None, node_id=None, edge_mask=None):
         edge_index, _ = dropout_adj(edge_index, p=self.dropedge,
                                     force_undirected=True,
                                     num_nodes=num_nodes,
@@ -273,7 +273,7 @@ class GIN(torch.nn.Module):
 
         self.dropedge = dropedge
 
-    def forward(self, num_nodes, z, edge_index, batch, x=None, edge_weight=None, node_id=None):
+    def forward(self, num_nodes, z, edge_index, batch, x=None, edge_weight=None, node_id=None, edge_mask=None):
         edge_index, _ = dropout_adj(edge_index, p=self.dropedge,
                                     force_undirected=True,
                                     num_nodes=num_nodes,

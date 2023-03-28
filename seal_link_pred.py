@@ -49,6 +49,8 @@ warnings.simplefilter('ignore', UserWarning)
 
 
 def run_sweal(args, device):
+    start_pipeline_time = time.time()
+
     if args.override_data:
         shutil.rmtree('dataset/')
 
@@ -592,6 +594,11 @@ def run_sweal(args, device):
     if args.delete_dataset:
         if os.path.exists(path):
             shutil.rmtree(path)
+    end_pipeline_time = time.time()
+    with open(log_file, 'a') as f:
+        message = f'Time for all: {end_pipeline_time - start_pipeline_time}'
+        print(message, file=f)
+        print(message)
 
     print("fin.")
 
