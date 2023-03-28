@@ -22,7 +22,7 @@ from torch_geometric.utils import k_hop_subgraph as org_k_hop_subgraph
 
 
 def neighbors(fringe, A, outgoing=True):
-    # Find all 1-hop neighbors of nodes in fringe from graph A, 
+    # Find all 1-hop neighbors of nodes in fringe from graph A,
     # where A is a scipy csr adjacency matrix.
     # If outgoing=True, find neighbors with outgoing edges;
     # otherwise, find neighbors with incoming edges (you should
@@ -37,7 +37,7 @@ def neighbors(fringe, A, outgoing=True):
 
 def k_hop_subgraph(src, dst, num_hops, A, sample_ratio=1.0,
                    max_nodes_per_hop=None, node_features=None,
-                   y=1, directed=False, A_csc=None, rw_kwargs=None):
+                   y=1, directed=False, A_csc=None, rw_kwargs=None, is_positive=True):
     debug = False  # set True manually to debug using matplotlib and gephi
     # Extract the k-hop enclosing subgraph around link (src, dst) from A.
     if not rw_kwargs:
@@ -120,9 +120,35 @@ def k_hop_subgraph(src, dst, num_hops, A, sample_ratio=1.0,
 
         y = torch.tensor([y], dtype=torch.int)
         x = data_org.x[sub_nodes] if hasattr(data_org.x, 'size') else None
+
+        if y == 1:
+            edge_mask = torch.ones(sub_edge_index_revised.size(1),dtype=torch.bool)
+            edge_mask[-1] = False
+            edge_mask[-2] = False
+        elif y == 0:
+            # print(edge_index.shape, mapping.shape)
+            # print(sub_edge_index_revised.shape)
+            sub_edge_index_revised = torch.cat([sub_edge_index_revised, mapping[[src, dst]].view(-1, 1), mapping[[dst, src]].view(-1, 1)], dim=1)
+            edge_mask = torch.ones(sub_edge_index_revised.size(1), dtype = torch.bool)
+            edge_mask[-1] = False
+            edge_mask[-2] = False
+            # print(src, dst)
+            # print(nodes)
+            # print(mapping)
+            # print(sub_edge_index_revised)
+            # ind = torch.where((sub_edge_index_revised == mapping[[src, dst]].view(-1, 1)).all(dim=0))
+            # edge_mask[ind[0]] = False
+            # ind = torch.where((sub_edge_index_revised == mapping[[dst, src]].view(-1, 1)).all(dim=0))
+            # edge_mask[ind[0]] = False
+            # assert edge_mask.sum() == edge_mask.shape[0] - 2, f'{edge_mask.sum()} {edge_mask.shape}'
+        else:
+            raise ValueError(f'{y}')
+        # print(edge_mask.shape, sub_edge_index_revised.shape)
+
         data_revised = Data(x=x, z=z_revised,
                             edge_index=sub_edge_index_revised, y=y, node_id=torch.LongTensor(rw_set),
-                            num_nodes=len(rw_set), edge_weight=torch.ones(sub_edge_index_revised.shape[-1]))
+                            num_nodes=len(rw_set), edge_weight=torch.ones(sub_edge_index_revised.shape[-1]), edge_mask=edge_mask)
+
         # end of core-logic for S.C.A.L.E.D.
         return data_revised
 
@@ -192,7 +218,7 @@ def drnl_node_labeling(adj, src, dst):
 
 
 def de_node_labeling(adj, src, dst, max_dist=3):
-    # Distance Encoding. See "Li et. al., Distance Encoding: Design Provably More 
+    # Distance Encoding. See "Li et. al., Distance Encoding: Design Provably More
     # Powerful Neural Networks for Graph Representation Learning."
     src, dst = (dst, src) if src > dst else (src, dst)
 
@@ -373,7 +399,8 @@ def calc_ratio_helper(link_index_pos, link_index_neg, A, x, y, num_hops, node_la
 
 def extract_enclosing_subgraphs(link_index, A, x, y, num_hops, node_label='drnl',
                                 ratio_per_hop=1.0, max_nodes_per_hop=None,
-                                directed=False, A_csc=None, rw_kwargs=None):
+                                directed=False, A_csc=None, rw_kwargs=None, is_positive=None):
+    assert is_positive is not None
     # Extract enclosing subgraphs from A for all links in link_index.
     data_list = []
 
@@ -381,13 +408,13 @@ def extract_enclosing_subgraphs(link_index, A, x, y, num_hops, node_label='drnl'
         if not rw_kwargs['rw_m']:
             tmp = k_hop_subgraph(src, dst, num_hops, A, ratio_per_hop,
                                  max_nodes_per_hop, node_features=x, y=y,
-                                 directed=directed, A_csc=A_csc)
+                                 directed=directed, A_csc=A_csc, is_positive=is_positive)
 
             data = construct_pyg_graph(*tmp, node_label)
         else:
             data = k_hop_subgraph(src, dst, num_hops, A, ratio_per_hop,
                                   max_nodes_per_hop, node_features=x, y=y,
-                                  directed=directed, A_csc=A_csc, rw_kwargs=rw_kwargs)
+                                  directed=directed, A_csc=A_csc, rw_kwargs=rw_kwargs, is_positive=is_positive)
         draw = False
         if draw:
             draw_graph(to_networkx(data))

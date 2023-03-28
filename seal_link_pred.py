@@ -1,7 +1,5 @@
 from timeit import default_timer
 
-import numpy as np
-import networkx as nx
 import torch
 import shutil
 
@@ -13,25 +11,16 @@ import os.path as osp
 from shutil import copy
 import copy as cp
 
-import torch_geometric.utils
 from torch_geometric import seed_everything
-from networkx import Graph
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import GCNConv, SAGEConv
-from torch_geometric.profile import profileit, timeit
-from tqdm import tqdm
+from torch_geometric.profile import timeit
 import pdb
 
-from sklearn.metrics import roc_auc_score, average_precision_score
 import scipy.sparse as ssp
-from torch.nn import BCEWithLogitsLoss
-
-from torch_sparse import coalesce, SparseTensor
 
 from torch_geometric.datasets import Planetoid, AttributedGraphDataset
-from torch_geometric.data import Dataset, InMemoryDataset, Data
+from torch_geometric.data import Data
 from torch_geometric.utils import to_undirected
-from torch_geometric import transforms as T
 
 from ogb.linkproppred import PygLinkPropPredDataset, Evaluator
 
@@ -41,554 +30,30 @@ from scipy.sparse import SparseEfficiencyWarning
 from baselines.gnn_link_pred import train_gnn
 from baselines.mf import train_mf
 from baselines.n2v import run_n2v
-from custom_losses import auc_loss, hinge_auc_loss
-from data_utils import load_splitted_data, read_label, read_edges
-from models import SAGE, DGCNN, GCN, GIN
+from data_utils import read_label, read_edges
+from models import SAGE, DGCNN, GCN, GIN, GCN_WalkPooling
 from ogbl_baselines.gnn_link_pred import train_gae_ogbl
 from ogbl_baselines.mf import train_mf_ogbl
 from ogbl_baselines.mlp_on_n2v import train_n2v_emb
 from ogbl_baselines.n2v import run_and_save_n2v
 from profiler_utils import profile_helper
-from utils import get_pos_neg_edges, extract_enclosing_subgraphs, construct_pyg_graph, k_hop_subgraph, do_edge_split, \
-    Logger, AA, CN, PPR, calc_ratio_helper, do_seal_edge_split
+from utils import get_pos_neg_edges, do_edge_split, Logger
+from test_utils import *
+from train_utils import *
+from dataset import *
+import shutil
 
 warnings.simplefilter('ignore', SparseEfficiencyWarning)
 warnings.simplefilter('ignore', FutureWarning)
 warnings.simplefilter('ignore', UserWarning)
 
 
-class SEALDataset(InMemoryDataset):
-    def __init__(self, root, data, split_edge, num_hops, percent=100, split='train',
-                 use_coalesce=False, node_label='drnl', ratio_per_hop=1.0,
-                 max_nodes_per_hop=None, directed=False, rw_kwargs=None, device='cpu', pairwise=False,
-                 pos_pairwise=False, neg_ratio=1):
-        self.data = data
-        self.split_edge = split_edge
-        self.num_hops = num_hops
-        self.percent = int(percent) if percent >= 1.0 else percent
-        self.split = split
-        self.use_coalesce = use_coalesce
-        self.node_label = node_label
-        self.ratio_per_hop = ratio_per_hop
-        self.max_nodes_per_hop = max_nodes_per_hop
-        self.directed = directed
-        self.device = device
-        self.N = self.data.num_nodes
-        self.E = self.data.edge_index.size()[-1]
-        self.sparse_adj = SparseTensor(
-            row=self.data.edge_index[0].to(self.device), col=self.data.edge_index[1].to(self.device),
-            value=torch.arange(self.E, device=self.device),
-            sparse_sizes=(self.N, self.N))
-        self.rw_kwargs = rw_kwargs
-        self.pairwise = pairwise
-        self.pos_pairwise = pos_pairwise
-        self.neg_ratio = neg_ratio
-        super(SEALDataset, self).__init__(root)
-        if not self.rw_kwargs.get('calc_ratio', False):
-            self.data, self.slices = torch.load(self.processed_paths[0])
-
-    @property
-    def processed_file_names(self):
-        if self.percent == 100:
-            name = 'SEAL_{}_data'.format(self.split)
-        else:
-            name = 'SEAL_{}_data_{}'.format(self.split, self.percent)
-        name += '.pt'
-        return [name]
-
-    def process(self):
-        pos_edge, neg_edge = get_pos_neg_edges(self.split, self.split_edge,
-                                               self.data.edge_index,
-                                               self.data.num_nodes,
-                                               self.percent, neg_ratio=self.neg_ratio)
-
-        if self.use_coalesce:  # compress mutli-edge into edge with weight
-            self.data.edge_index, self.data.edge_weight = coalesce(
-                self.data.edge_index, self.data.edge_weight,
-                self.data.num_nodes, self.data.num_nodes)
-
-        if 'edge_weight' in self.data:
-            edge_weight = self.data.edge_weight.view(-1)
-        else:
-            edge_weight = torch.ones(self.data.edge_index.size(1), dtype=int)
-        A = ssp.csr_matrix(
-            (edge_weight, (self.data.edge_index[0], self.data.edge_index[1])),
-            shape=(self.data.num_nodes, self.data.num_nodes)
-        )
-
-        if self.directed:
-            A_csc = A.tocsc()
-        else:
-            A_csc = None
-
-        # Extract enclosing subgraphs for pos and neg edges
-
-        rw_kwargs = {
-            "rw_m": self.rw_kwargs.get('m'),
-            "rw_M": self.rw_kwargs.get('M'),
-            "sparse_adj": self.sparse_adj,
-            "edge_index": self.data.edge_index,
-            "device": self.device,
-            "data": self.data,
-        }
-
-        if self.rw_kwargs.get('calc_ratio', False):
-            print(f"Calculating preprocessing stats for {self.split}")
-            calc_ratio_helper(pos_edge, neg_edge, A, self.data.x, -1, self.num_hops, self.node_label,
-                              self.ratio_per_hop, self.max_nodes_per_hop, self.directed, A_csc, rw_kwargs, self.split,
-                              args.dataset, args.seed)
-            exit()
-
-        if not self.pairwise:
-            print("Setting up Positive Subgraphs")
-            pos_list = extract_enclosing_subgraphs(
-                pos_edge, A, self.data.x, 1, self.num_hops, self.node_label,
-                self.ratio_per_hop, self.max_nodes_per_hop, self.directed, A_csc, rw_kwargs)
-            print("Setting up Negative Subgraphs")
-            neg_list = extract_enclosing_subgraphs(
-                neg_edge, A, self.data.x, 0, self.num_hops, self.node_label,
-                self.ratio_per_hop, self.max_nodes_per_hop, self.directed, A_csc, rw_kwargs)
-            torch.save(self.collate(pos_list + neg_list), self.processed_paths[0])
-            del pos_list, neg_list
-        else:
-            if self.pos_pairwise:
-                pos_list = extract_enclosing_subgraphs(
-                    pos_edge, A, self.data.x, 1, self.num_hops, self.node_label,
-                    self.ratio_per_hop, self.max_nodes_per_hop, self.directed, A_csc, rw_kwargs)
-                torch.save(self.collate(pos_list), self.processed_paths[0])
-                del pos_list
-            else:
-                neg_list = extract_enclosing_subgraphs(
-                    neg_edge, A, self.data.x, 0, self.num_hops, self.node_label,
-                    self.ratio_per_hop, self.max_nodes_per_hop, self.directed, A_csc, rw_kwargs)
-                torch.save(self.collate(neg_list), self.processed_paths[0])
-                del neg_list
-
-
-class SEALDynamicDataset(Dataset):
-    def __init__(self, root, data, split_edge, num_hops, percent=100, split='train',
-                 use_coalesce=False, node_label='drnl', ratio_per_hop=1.0,
-                 max_nodes_per_hop=None, directed=False, rw_kwargs=None, device='cpu', pairwise=False,
-                 pos_pairwise=False, neg_ratio=1, **kwargs):
-        self.data = data
-        self.split_edge = split_edge
-        self.num_hops = num_hops
-        self.percent = percent
-        self.use_coalesce = use_coalesce
-        self.node_label = node_label
-        self.ratio_per_hop = ratio_per_hop
-        self.max_nodes_per_hop = max_nodes_per_hop
-        self.directed = directed
-        self.rw_kwargs = rw_kwargs
-        self.device = device
-        self.N = self.data.num_nodes
-        self.E = self.data.edge_index.size()[-1]
-        self.sparse_adj = SparseTensor(
-            row=self.data.edge_index[0].to(self.device), col=self.data.edge_index[1].to(self.device),
-            value=torch.arange(self.E, device=self.device),
-            sparse_sizes=(self.N, self.N))
-        self.pairwise = pairwise
-        self.pos_pairwise = pos_pairwise
-        self.neg_ratio = neg_ratio
-        super(SEALDynamicDataset, self).__init__(root)
-
-        pos_edge, neg_edge = get_pos_neg_edges(split, self.split_edge,
-                                               self.data.edge_index,
-                                               self.data.num_nodes,
-                                               self.percent, neg_ratio=self.neg_ratio)
-        if self.pairwise:
-            if self.pos_pairwise:
-                self.links = pos_edge.t().tolist()
-                self.labels = [1] * pos_edge.size(1)
-            else:
-                self.links = neg_edge.t().tolist()
-                self.labels = [0] * neg_edge.size(1)
-        else:
-            self.links = torch.cat([pos_edge, neg_edge], 1).t().tolist()
-            self.labels = [1] * pos_edge.size(1) + [0] * neg_edge.size(1)
-
-        if self.use_coalesce:  # compress mutli-edge into edge with weight
-            self.data.edge_index, self.data.edge_weight = coalesce(
-                self.data.edge_index, self.data.edge_weight,
-                self.data.num_nodes, self.data.num_nodes)
-
-        if 'edge_weight' in self.data:
-            edge_weight = self.data.edge_weight.view(-1)
-        else:
-            edge_weight = torch.ones(self.data.edge_index.size(1), dtype=int)
-        self.A = ssp.csr_matrix(
-            (edge_weight, (self.data.edge_index[0], self.data.edge_index[1])),
-            shape=(self.data.num_nodes, self.data.num_nodes)
-        )
-        if self.directed:
-            self.A_csc = self.A.tocsc()
-        else:
-            self.A_csc = None
-
-        self.unique_nodes = {}
-        if self.rw_kwargs.get('M'):
-            print("Start caching random walk unique nodes")
-            # if in dynamic SWEAL mode, need to cache the unique nodes of random walks before get() due to below error
-            # RuntimeError: Cannot re-initialize CUDA in forked subprocess.
-            # To use CUDA with multiprocessing, you must use the 'spawn' start method
-            for link in self.links:
-                rw_M = self.rw_kwargs.get('M')
-                starting_nodes = []
-                [starting_nodes.extend(link) for _ in range(rw_M)]
-                start = torch.tensor(starting_nodes, dtype=torch.long, device=device)
-                rw = self.sparse_adj.random_walk(start.flatten(), self.rw_kwargs.get('m'))
-                self.unique_nodes[tuple(link)] = torch.unique(rw.flatten()).tolist()
-            print("Finish caching random walk unique nodes")
-
-    def __len__(self):
-        return len(self.links)
-
-    def len(self):
-        return self.__len__()
-
-    def get(self, idx):
-        src, dst = self.links[idx]
-        y = self.labels[idx]
-
-        rw_kwargs = {
-            "rw_m": self.rw_kwargs.get('m'),
-            "rw_M": self.rw_kwargs.get('M'),
-            "sparse_adj": self.sparse_adj,
-            "edge_index": self.data.edge_index,
-            "device": self.device,
-            "data": self.data,
-            "unique_nodes": self.unique_nodes
-        }
-
-        if not rw_kwargs['rw_m']:
-            tmp = k_hop_subgraph(src, dst, self.num_hops, self.A, self.ratio_per_hop,
-                                 self.max_nodes_per_hop, node_features=self.data.x,
-                                 y=y, directed=self.directed, A_csc=self.A_csc)
-            data = construct_pyg_graph(*tmp, self.node_label)
-        else:
-            data = k_hop_subgraph(src, dst, self.num_hops, self.A, self.ratio_per_hop,
-                                  self.max_nodes_per_hop, node_features=self.data.x,
-                                  y=y, directed=self.directed, A_csc=self.A_csc, rw_kwargs=rw_kwargs)
-
-        return data
-
-
-@profileit()
-def profile_train(model, train_loader, optimizer, device, emb, train_dataset, args):
-    # normal training with BCE logit loss with profiling enabled
-    model.train()
-
-    total_loss = 0
-    pbar = tqdm(train_loader, ncols=70)
-    for data in pbar:
-        data = data.to(device)
-        optimizer.zero_grad()
-        x = data.x if args.use_feature else None
-        edge_weight = data.edge_weight if args.use_edge_weight else None
-        node_id = data.node_id if emb else None
-        num_nodes = data.num_nodes
-        logits = model(num_nodes, data.z, data.edge_index, data.batch, x, edge_weight, node_id)
-        loss = BCEWithLogitsLoss()(logits.view(-1), data.y.to(torch.float))
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * data.num_graphs
-
-    return total_loss / len(train_dataset)
-
-
-def train_bce(model, train_loader, optimizer, device, emb, train_dataset, args):
-    # normal training with BCE logit loss
-    model.train()
-
-    total_loss = 0
-    pbar = tqdm(train_loader, ncols=70)
-    for data in pbar:
-        data = data.to(device)
-        optimizer.zero_grad()
-        x = data.x if args.use_feature else None
-        edge_weight = data.edge_weight if args.use_edge_weight else None
-        node_id = data.node_id if emb else None
-        num_nodes = data.num_nodes
-        logits = model(num_nodes, data.z, data.edge_index, data.batch, x, edge_weight, node_id)
-        loss = BCEWithLogitsLoss()(logits.view(-1), data.y.to(torch.float))
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * data.num_graphs
-
-    return total_loss / len(train_dataset)
-
-
-def train_pairwise(model, train_positive_loader, train_negative_loader, optimizer, device, emb, train_dataset, args):
-    # pairwise training with AUC loss + many others from PLNLP paper
-    model.train()
-
-    total_loss = 0
-    pbar = tqdm(train_positive_loader, ncols=70)
-    train_negative_loader = iter(train_negative_loader)
-
-    for indx, data in enumerate(pbar):
-        pos_data = data.to(device)
-        optimizer.zero_grad()
-
-        pos_x = pos_data.x if args.use_feature else None
-        pos_edge_weight = pos_data.edge_weight if args.use_edge_weight else None
-        pos_node_id = pos_data.node_id if emb else None
-        pos_num_nodes = pos_data.num_nodes
-        pos_logits = model(pos_num_nodes, pos_data.z, pos_data.edge_index, data.batch, pos_x, pos_edge_weight,
-                           pos_node_id)
-
-        neg_data = next(train_negative_loader).to(device)
-        neg_x = neg_data.x if args.use_feature else None
-        neg_edge_weight = neg_data.edge_weight if args.use_edge_weight else None
-        neg_node_id = neg_data.node_id if emb else None
-        neg_num_nodes = neg_data.num_nodes
-        neg_logits = model(neg_num_nodes, neg_data.z, neg_data.edge_index, neg_data.batch, neg_x, neg_edge_weight,
-                           neg_node_id)
-        loss_fn = get_loss(args.loss_fn)
-        loss = loss_fn(pos_logits, neg_logits, args.neg_ratio)
-
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * data.num_graphs
-
-    return total_loss / len(train_dataset)
-
-
-def get_loss(loss_function):
-    if loss_function == 'auc_loss':
-        return auc_loss
-    elif loss_function == 'hinge_auc_loss':
-        return hinge_auc_loss
-    else:
-        raise NotImplementedError(f'Loss function {loss_function} not implemented')
-
-
-@torch.no_grad()
-def test(evaluator, model, val_loader, device, emb, test_loader, args):
-    model.eval()
-
-    y_pred, y_true = [], []
-    for data in tqdm(val_loader, ncols=70):
-        data = data.to(device)
-        x = data.x if args.use_feature else None
-        edge_weight = data.edge_weight if args.use_edge_weight else None
-        node_id = data.node_id if emb else None
-        num_nodes = data.num_nodes
-        logits = model(num_nodes, data.z, data.edge_index, data.batch, x, edge_weight, node_id)
-        y_pred.append(logits.view(-1).cpu())
-        y_true.append(data.y.view(-1).cpu().to(torch.float))
-    val_pred, val_true = torch.cat(y_pred), torch.cat(y_true)
-    pos_val_pred = val_pred[val_true == 1]
-    neg_val_pred = val_pred[val_true == 0]
-
-    y_pred, y_true = [], []
-    for data in tqdm(test_loader, ncols=70):
-        data = data.to(device)
-        x = data.x if args.use_feature else None
-        edge_weight = data.edge_weight if args.use_edge_weight else None
-        node_id = data.node_id if emb else None
-        num_nodes = data.num_nodes
-        logits = model(num_nodes, data.z, data.edge_index, data.batch, x, edge_weight, node_id)
-        y_pred.append(logits.view(-1).cpu())
-        y_true.append(data.y.view(-1).cpu().to(torch.float))
-    test_pred, test_true = torch.cat(y_pred), torch.cat(y_true)
-    pos_test_pred = test_pred[test_true == 1]
-    neg_test_pred = test_pred[test_true == 0]
-
-    if args.eval_metric == 'hits':
-        results = evaluate_hits(pos_val_pred, neg_val_pred, pos_test_pred, neg_test_pred, evaluator)
-    elif args.eval_metric == 'mrr':
-        results = evaluate_mrr(pos_val_pred, neg_val_pred, pos_test_pred, neg_test_pred, evaluator)
-    elif args.eval_metric == 'auc':
-        results = evaluate_auc(val_pred, val_true, test_pred, test_true)
-
-    return results
-
-
-@torch.no_grad()
-def test_multiple_models(models, val_loader, device, emb, test_loader, evaluator, args):
-    raise NotImplementedError("This is untested for SCALED")
-    for m in models:
-        m.eval()
-
-    y_pred, y_true = [[] for _ in range(len(models))], [[] for _ in range(len(models))]
-    for data in tqdm(val_loader, ncols=70):
-        data = data.to(device)
-        x = data.x if args.use_feature else None
-        edge_weight = data.edge_weight if args.use_edge_weight else None
-        node_id = data.node_id if emb else None
-        for i, m in enumerate(models):
-            logits = m(data.z, data.edge_index, data.batch, x, edge_weight, node_id)
-            y_pred[i].append(logits.view(-1).cpu())
-            y_true[i].append(data.y.view(-1).cpu().to(torch.float))
-    val_pred = [torch.cat(y_pred[i]) for i in range(len(models))]
-    val_true = [torch.cat(y_true[i]) for i in range(len(models))]
-    pos_val_pred = [val_pred[i][val_true[i] == 1] for i in range(len(models))]
-    neg_val_pred = [val_pred[i][val_true[i] == 0] for i in range(len(models))]
-
-    y_pred, y_true = [[] for _ in range(len(models))], [[] for _ in range(len(models))]
-    for data in tqdm(test_loader, ncols=70):
-        data = data.to(device)
-        x = data.x if args.use_feature else None
-        edge_weight = data.edge_weight if args.use_edge_weight else None
-        node_id = data.node_id if emb else None
-        for i, m in enumerate(models):
-            logits = m(data.z, data.edge_index, data.batch, x, edge_weight, node_id)
-            y_pred[i].append(logits.view(-1).cpu())
-            y_true[i].append(data.y.view(-1).cpu().to(torch.float))
-    test_pred = [torch.cat(y_pred[i]) for i in range(len(models))]
-    test_true = [torch.cat(y_true[i]) for i in range(len(models))]
-    pos_test_pred = [test_pred[i][test_true[i] == 1] for i in range(len(models))]
-    neg_test_pred = [test_pred[i][test_true[i] == 0] for i in range(len(models))]
-
-    Results = []
-    for i in range(len(models)):
-        if args.eval_metric == 'hits':
-            Results.append(evaluate_hits(pos_val_pred[i], neg_val_pred[i],
-                                         pos_test_pred[i], neg_test_pred[i]))
-        elif args.eval_metric == 'mrr':
-            Results.append(evaluate_mrr(pos_val_pred[i], neg_val_pred[i],
-                                        pos_test_pred[i], neg_test_pred[i], evaluator))
-        elif args.eval_metric == 'auc':
-            Results.append(evaluate_auc(val_pred[i], val_true[i],
-                                        test_pred[i], test_pred[i]))
-    return Results
-
-
-def evaluate_hits(pos_val_pred, neg_val_pred, pos_test_pred, neg_test_pred, evaluator):
-    results = {}
-    for K in [20, 50, 100]:
-        evaluator.K = K
-        valid_hits = evaluator.eval({
-            'y_pred_pos': pos_val_pred,
-            'y_pred_neg': neg_val_pred,
-        })[f'hits@{K}']
-        test_hits = evaluator.eval({
-            'y_pred_pos': pos_test_pred,
-            'y_pred_neg': neg_test_pred,
-        })[f'hits@{K}']
-
-        results[f'Hits@{K}'] = (valid_hits, test_hits)
-
-    return results
-
-
-def evaluate_mrr(pos_val_pred, neg_val_pred, pos_test_pred, neg_test_pred, evaluator):
-    neg_val_pred = neg_val_pred.view(pos_val_pred.shape[0], -1)
-    neg_test_pred = neg_test_pred.view(pos_test_pred.shape[0], -1)
-    results = {}
-    valid_mrr = evaluator.eval({
-        'y_pred_pos': pos_val_pred,
-        'y_pred_neg': neg_val_pred,
-    })['mrr_list'].mean().item()
-
-    test_mrr = evaluator.eval({
-        'y_pred_pos': pos_test_pred,
-        'y_pred_neg': neg_test_pred,
-    })['mrr_list'].mean().item()
-
-    results['MRR'] = (valid_mrr, test_mrr)
-
-    return results
-
-
-def evaluate_auc(val_pred, val_true, test_pred, test_true):
-    # this also evaluates AP, but the function is not renamed as such
-    valid_auc = roc_auc_score(val_true, val_pred)
-    test_auc = roc_auc_score(test_true, test_pred)
-
-    valid_ap = average_precision_score(val_true, val_pred)
-    test_ap = average_precision_score(test_true, test_pred)
-
-    results = {}
-
-    results['AUC'] = (valid_auc, test_auc)
-    results['AP'] = (valid_ap, test_ap)
-
-    return results
-
-
-class SWEALArgumentParser:
-    def __init__(self, dataset, fast_split, model, sortpool_k, num_layers, hidden_channels, batch_size, num_hops,
-                 ratio_per_hop, max_nodes_per_hop, node_label, use_feature, use_edge_weight, lr, epochs, runs,
-                 train_percent, val_percent, test_percent, dynamic_train, dynamic_val, dynamic_test, num_workers,
-                 train_node_embedding, pretrained_node_embedding, use_valedges_as_input, eval_steps, log_steps,
-                 data_appendix, save_appendix, keep_old, continue_from, only_test, test_multiple_models, use_heuristic,
-                 m, M, dropedge, calc_ratio, checkpoint_training, delete_dataset, pairwise, loss_fn, neg_ratio,
-                 profile, split_val_ratio, split_test_ratio, train_mlp, dropout, train_gae, base_gae, dataset_stats,
-                 seed, dataset_split_num, train_n2v, train_mf):
-        # Data Settings
-        self.dataset = dataset
-        self.fast_split = fast_split
-        self.delete_dataset = delete_dataset
-
-        # GNN Settings
-        self.model = model
-        self.sortpool_k = sortpool_k
-        self.num_layers = num_layers
-        self.hidden_channels = hidden_channels
-        self.batch_size = batch_size
-
-        # Subgraph extraction settings
-        self.num_hops = num_hops
-        self.ratio_per_hop = ratio_per_hop
-        self.max_nodes_per_hop = max_nodes_per_hop
-        self.node_label = node_label
-        self.use_feature = use_feature
-        self.use_edge_weight = use_edge_weight
-
-        # Training settings
-        self.lr = lr
-        self.epochs = epochs
-        self.runs = runs
-        self.train_percent = train_percent
-        self.val_percent = val_percent
-        self.test_percent = test_percent
-        self.dynamic_train = dynamic_train
-        self.dynamic_val = dynamic_val
-        self.dynamic_test = dynamic_test
-        self.num_workers = num_workers
-        self.train_node_embedding = train_node_embedding
-        self.pretrained_node_embedding = pretrained_node_embedding
-
-        # Testing settings
-        self.use_valedges_as_input = use_valedges_as_input
-        self.eval_steps = eval_steps
-        self.log_steps = log_steps
-        self.checkpoint_training = checkpoint_training
-        self.data_appendix = data_appendix
-        self.save_appendix = save_appendix
-        self.keep_old = keep_old
-        self.continue_from = continue_from
-        self.only_test = only_test
-        self.test_multiple_models = test_multiple_models
-        self.use_heuristic = use_heuristic
-
-        # SWEAL
-        self.m = m
-        self.M = M
-        self.dropedge = dropedge
-        self.calc_ratio = calc_ratio
-        self.pairwise = pairwise
-        self.loss_fn = loss_fn
-        self.neg_ratio = neg_ratio
-        self.profile = profile
-        self.split_val_ratio = split_val_ratio
-        self.split_test_ratio = split_test_ratio
-        self.train_mlp = train_mlp
-        self.dropout = dropout
-        self.train_gae = train_gae
-        self.base_gae = base_gae
-        self.dataset_stats = dataset_stats
-        self.seed = seed
-        self.dataset_split_num = dataset_split_num
-        self.train_n2v = train_n2v
-        self.train_mf = train_mf
-
-
 def run_sweal(args, device):
+    if args.override_data:
+        shutil.rmtree('dataset/')
+
     if args.save_appendix == '':
-        args.save_appendix = '_' + time.strftime("%Y%m%d%H%M%S") + f'_seed{args.seed}'
+        args.save_appendix = '_' + time.strftime("%Y_%m_%d_%H_%M_%S") + f'_seed{args.seed}'
         if args.m and args.M:
             args.save_appendix += f'_m{args.m}_M{args.M}_dropedge{args.dropedge}_seed{args.seed}'
 
@@ -603,7 +68,7 @@ def run_sweal(args, device):
         if args.use_valedges_as_input:
             args.data_appendix += '_uvai'
 
-    args.res_dir = os.path.join('results/{}{}'.format(args.dataset, args.save_appendix))
+    args.res_dir = os.path.join('results/{}{}'.format(args.dataset, args.exp_name))
     print('Results will be saved in ' + args.res_dir)
     if not os.path.exists(args.res_dir):
         os.makedirs(args.res_dir)
@@ -619,6 +84,8 @@ def run_sweal(args, device):
     print('Command line input: ' + cmd_input + ' is saved.')
     with open(log_file, 'a') as f:
         f.write('\n' + cmd_input)
+    with open(os.path.join(args.res_dir, 'comment.txt'), 'w') as f:
+        f.write(args.comment)
 
     # S[W]EAL Dataset prep + Training Flow
     if args.dataset.startswith('ogbl'):
@@ -683,14 +150,14 @@ def run_sweal(args, device):
             print(f'Dataset: {dataset}:')
             print('======================')
             print(f'Number of graphs: {len(dataset)}')
-            print(f'Number of features: {dataset.num_features}')
+            print(f'Number of node features: {dataset.num_features}')
             print(f'Number of nodes: {G.number_of_nodes()}')
             print(f'Number of edges: {G.number_of_edges()}')
             degrees = [x[1] for x in G.degree]
             print(f'Average node degree: {sum(degrees) / len(G.nodes):.2f}')
             print(f'Average clustering coeffiecient: {nx.average_clustering(G)}')
             print(f'Is undirected: {data.is_undirected()}')
-            exit()
+            print(f'Training {args.model}')
         else:
             print(f'Dataset: {dataset}:')
             print('======================')
@@ -701,7 +168,6 @@ def run_sweal(args, device):
             print(f'Average node degree: {data.num_edges / data.num_nodes:.2f}')
             print(f'Average clustering coeffiecient: {nx.average_clustering(G)}')
             print(f'Is undirected: {data.is_undirected()}')
-            exit()
 
     if args.dataset.startswith('ogbl-citation'):
         args.eval_metric = 'mrr'
@@ -804,6 +270,7 @@ def run_sweal(args, device):
         print("Setting up Train data")
         dataset_class = 'SEALDynamicDataset' if args.dynamic_train else 'SEALDataset'
         if not args.pairwise:
+            # тут SEALDataset
             train_dataset = eval(dataset_class)(
                 path,
                 data,
@@ -859,8 +326,8 @@ def run_sweal(args, device):
                 pos_pairwise=False,
                 neg_ratio=args.neg_ratio,
             )
-    viz = False
-    if viz:  # visualize some graphs
+    max_viz = 3
+    if max_viz:  # visualize some graphs
         import networkx as nx
         from torch_geometric.utils import to_networkx
         import matplotlib
@@ -869,18 +336,20 @@ def run_sweal(args, device):
         import matplotlib.pyplot as plt
 
         loader = DataLoader(train_dataset, batch_size=1, shuffle=False)
-        for g in loader:
+        for i, g in enumerate(loader):
+            if i >= max_viz:
+                break
             f = plt.figure(figsize=(20, 20))
-            limits = plt.axis('off')
             g = g.to(device)
             node_size = 100
             with_labels = True
             G = to_networkx(g, node_attrs=['z'])
             labels = {i: G.nodes[i]['z'] for i in range(len(G))}
+            colors = ['green' if labels[i] != 1 else 'red' for i in range(len(G))]
             nx.draw(G, node_size=node_size, arrows=True, with_labels=with_labels,
-                    labels=labels)
-            f.savefig('tmp_vis.png')
-            pdb.set_trace()
+                    labels=labels, node_color=colors)
+            os.makedirs(f'{args.res_dir}/graphs/', exist_ok=True)
+            f.savefig(f'{args.res_dir}/graphs/train_graph_{i}.png')
 
     if not any([args.train_gae, args.train_mf, args.train_n2v]):
         print("Setting up Val data")
@@ -986,6 +455,9 @@ def run_sweal(args, device):
         elif args.model == 'GIN':
             model = GIN(args.hidden_channels, args.num_layers, max_z, train_dataset,
                         args.use_feature, node_embedding=emb).to(device)
+        elif args.model == 'GCN_WalkPooling':
+            model = GCN_WalkPooling(args.hidden_channels, args.num_layers, max_z, train_dataset,
+                        args.use_feature, node_embedding=emb, dropedge=args.dropedge).to(device)
         parameters = list(model.parameters())
         if args.train_node_embedding:
             torch.nn.init.xavier_uniform_(emb.weight)
@@ -1132,7 +604,7 @@ def run_sweal_with_run_profiling(args, device):
     print(f"Time taken for run: {end - start:.2f} seconds")
 
 
-if __name__ == '__main__':
+def main():
     # Data settings
     parser = argparse.ArgumentParser(description='OGBL (SEAL)')
     parser.add_argument('--dataset', type=str, default='ogbl-collab')
@@ -1193,7 +665,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_heuristic', type=str, default=None,
                         help="test a link prediction heuristic (CN or AA)")
     parser.add_argument('--dataset_stats', action='store_true',
-                        help="Print dataset statistics")
+                        help="Print dataset statistics", default=True)
     parser.add_argument('--m', type=int, default=0, help="Set rw length")
     parser.add_argument('--M', type=int, default=0, help="Set number of rw")
     parser.add_argument('--dropedge', type=float, default=.0, help="Drop Edge Value for initial edge_index")
@@ -1221,6 +693,10 @@ if __name__ == '__main__':
     parser.add_argument('--train_n2v', action='store_true', help="Train node2vec on the dataset")
     parser.add_argument('--train_mf', action='store_true', help="Train MF on the dataset")
 
+    parser.add_argument('--comment', type=str, help="Comment something about training model", default='')
+    parser.add_argument('--exp_name', type=str, help="Exp name", default='')
+    parser.add_argument('--override_data', action='store_true', help="If override dataset", default='')
+
     args = parser.parse_args()
 
     device = torch.device(f'cuda:{args.cuda_device}' if torch.cuda.is_available() else 'cpu')
@@ -1237,3 +713,13 @@ if __name__ == '__main__':
         run_sweal(args, device)
         end = default_timer()
         print(f"Time taken for run: {end - start:.2f} seconds")
+
+if __name__ == '__main__':
+    # import pprofile
+    # profiler = pprofile.Profile()
+    # with profiler:
+    #     main()
+    # profiler.print_stats()
+
+    # profiler.dump_stats("profstats.txt")
+    main()

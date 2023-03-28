@@ -7,11 +7,89 @@ import argparse
 
 from tqdm import tqdm
 
-from seal_link_pred import SWEALArgumentParser, run_sweal
+from seal_link_pred import run_sweal
 
 warnings.filterwarnings(action="ignore")
 
 from torch_geometric import seed_everything
+
+
+class SWEALArgumentParser:
+    def __init__(self, dataset, fast_split, model, sortpool_k, num_layers, hidden_channels, batch_size, num_hops,
+                 ratio_per_hop, max_nodes_per_hop, node_label, use_feature, use_edge_weight, lr, epochs, runs,
+                 train_percent, val_percent, test_percent, dynamic_train, dynamic_val, dynamic_test, num_workers,
+                 train_node_embedding, pretrained_node_embedding, use_valedges_as_input, eval_steps, log_steps,
+                 data_appendix, save_appendix, keep_old, continue_from, only_test, test_multiple_models, use_heuristic,
+                 m, M, dropedge, calc_ratio, checkpoint_training, delete_dataset, pairwise, loss_fn, neg_ratio,
+                 profile, split_val_ratio, split_test_ratio, train_mlp, dropout, train_gae, base_gae, dataset_stats,
+                 seed, dataset_split_num, train_n2v, train_mf):
+        # Data Settings
+        self.dataset = dataset
+        self.fast_split = fast_split
+        self.delete_dataset = delete_dataset
+
+        # GNN Settings
+        self.model = model
+        self.sortpool_k = sortpool_k
+        self.num_layers = num_layers
+        self.hidden_channels = hidden_channels
+        self.batch_size = batch_size
+
+        # Subgraph extraction settings
+        self.num_hops = num_hops
+        self.ratio_per_hop = ratio_per_hop
+        self.max_nodes_per_hop = max_nodes_per_hop
+        self.node_label = node_label
+        self.use_feature = use_feature
+        self.use_edge_weight = use_edge_weight
+
+        # Training settings
+        self.lr = lr
+        self.epochs = epochs
+        self.runs = runs
+        self.train_percent = train_percent
+        self.val_percent = val_percent
+        self.test_percent = test_percent
+        self.dynamic_train = dynamic_train
+        self.dynamic_val = dynamic_val
+        self.dynamic_test = dynamic_test
+        self.num_workers = num_workers
+        self.train_node_embedding = train_node_embedding
+        self.pretrained_node_embedding = pretrained_node_embedding
+
+        # Testing settings
+        self.use_valedges_as_input = use_valedges_as_input
+        self.eval_steps = eval_steps
+        self.log_steps = log_steps
+        self.checkpoint_training = checkpoint_training
+        self.data_appendix = data_appendix
+        self.save_appendix = save_appendix
+        self.keep_old = keep_old
+        self.continue_from = continue_from
+        self.only_test = only_test
+        self.test_multiple_models = test_multiple_models
+        self.use_heuristic = use_heuristic
+
+        # SWEAL
+        self.m = m
+        self.M = M
+        self.dropedge = dropedge
+        self.calc_ratio = calc_ratio
+        self.pairwise = pairwise
+        self.loss_fn = loss_fn
+        self.neg_ratio = neg_ratio
+        self.profile = profile
+        self.split_val_ratio = split_val_ratio
+        self.split_test_ratio = split_test_ratio
+        self.train_mlp = train_mlp
+        self.dropout = dropout
+        self.train_gae = train_gae
+        self.base_gae = base_gae
+        self.dataset_stats = dataset_stats
+        self.seed = seed
+        self.dataset_split_num = dataset_split_num
+        self.train_n2v = train_n2v
+        self.train_mf = train_mf
 
 
 class HyperTuningSearchSpace:
