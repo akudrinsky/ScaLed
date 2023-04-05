@@ -406,15 +406,22 @@ def extract_enclosing_subgraphs(link_index, A, x, y, num_hops, node_label='drnl'
 
     for src, dst in tqdm(link_index.t().tolist()):
         if not rw_kwargs['rw_m']:
-            tmp = k_hop_subgraph(src, dst, num_hops, A, ratio_per_hop,
-                                 max_nodes_per_hop, node_features=x, y=y,
-                                 directed=directed, A_csc=A_csc, is_positive=is_positive)
-
-            data = construct_pyg_graph(*tmp, node_label)
+            try:
+                tmp = k_hop_subgraph(src, dst, num_hops, A, ratio_per_hop,
+                                    max_nodes_per_hop, node_features=x, y=y,
+                                    directed=directed, A_csc=A_csc, is_positive=is_positive)
+                data = construct_pyg_graph(*tmp, node_label)
+            except Exception as e:
+                print(e)
+                continue
         else:
-            data = k_hop_subgraph(src, dst, num_hops, A, ratio_per_hop,
-                                  max_nodes_per_hop, node_features=x, y=y,
-                                  directed=directed, A_csc=A_csc, rw_kwargs=rw_kwargs, is_positive=is_positive)
+            try:
+                data = k_hop_subgraph(src, dst, num_hops, A, ratio_per_hop,
+                                    max_nodes_per_hop, node_features=x, y=y,
+                                    directed=directed, A_csc=A_csc, rw_kwargs=rw_kwargs, is_positive=is_positive)
+            except Exception as e:
+                print(e)
+                continue
         draw = False
         if draw:
             draw_graph(to_networkx(data))

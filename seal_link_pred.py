@@ -51,7 +51,7 @@ warnings.simplefilter('ignore', UserWarning)
 def run_sweal(args, device):
     start_pipeline_time = time.time()
 
-    if args.override_data:
+    if os.path.exists('dataset/') and args.override_data:
         shutil.rmtree('dataset/')
 
     if args.save_appendix == '':
