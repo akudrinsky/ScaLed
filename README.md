@@ -1,3 +1,7 @@
+NEW THINGS:
+
+http://snap.stanford.edu/decagon/
+
 # ScaLed: Sampling En**c**losing Subgr**a**ph for **L**ink Pr**ed**iction
 
 ScaLed (Sampling En**c**losing Subgr**a**ph for **L**ink Pr**ed**iction) is a fork of [SEAL](https://github.com/facebookresearch/SEAL_OGB) aimed at training GNNs on sparser k-hop subgraphs on the downstream task of link prediction.
@@ -10,11 +14,11 @@ ACM Digital Library Link: https://dl.acm.org/doi/10.1145/3511808.3557688
 
 
 ## Experimental setup
-To setup the development environment, use the `quick_install.sh` bash script. This contains all the essential python packages needed to run the experiments and work on the codebase. **Please note that this dev setup is specifically crafted for Macbooks running the M1 silicon.** If you have any other system, update how Pytorch and Pytorch Geometric gets build in the script (lines 5 and 6).  
+To setup the development environment, use the `quick_install.sh` bash script. This contains all the essential python packages needed to run the experiments and work on the codebase. **Please note that this dev setup is specifically crafted for Macbooks running the M1 silicon.** If you have any other system, update how Pytorch and Pytorch Geometric gets build in the script (lines 5 and 6).
 
 To run the quick install use the command: `source quick_install.sh`. Do note that you will be prompted to enter `y` at times.
 
-In case any important package is left out, please let us know. 
+In case any important package is left out, please let us know.
 
 ## Useful Command line arguments
 Since ScaLed is a fork of the [SEAL](https://github.com/facebookresearch/SEAL_OGB) repo, all the command line arguments that exist in SEAL-OGB(with few exceptions) will work in ScaLed as well.
@@ -34,7 +38,7 @@ The following are the command line arguments specifically created for ScaLed
 - `split_val_ratio` - Choose the split % for validation (defaults to 5% of data)
 - `split_test_ratio` - Choose the split % for test (defaults to 10% of data)
 - `train_mlp` - Train using structure unaware MLP (this is used as a baseline)
-- `train_gae` - Train using graph auto encoders (this is used as a baseline) 
+- `train_gae` - Train using graph auto encoders (this is used as a baseline)
 - `base_gae` - Set the base GNN encoder for the GAE training
 - `dropout` - Set value of dropout in forward pass of GNNs (defaults to 0.5)
 - `seed` - Set seed for reproducibility (defaults to 1)
@@ -90,7 +94,7 @@ Since ScaLed is a fork of the original SEAL-OGB repo, all of their experiments w
 
 
 ## Reporting Issues and Improvements
-We currently don't have an issue/PR template. However, if you find an issue in our code please create an issue in GitHub. It would be great if you could give as much information regarding the issue as possible(what command was run, what are the python package versions, providing full stack trace etc.).  
+We currently don't have an issue/PR template. However, if you find an issue in our code please create an issue in GitHub. It would be great if you could give as much information regarding the issue as possible(what command was run, what are the python package versions, providing full stack trace etc.).
 
 If you have any further questions, you can reach out to us via email.
 [Paul Louis](mailto:paul.louis@ontariotechu.net), [Shweta Ann Jacob](mailto:shweta.jacob@ontariotechu.net)
@@ -106,7 +110,7 @@ We also provide the following miscellaneous codes:
 - `parsers` folder - Helps parse output logs to build tables in the paper
 
 ## Bibtex
-If you find our work useful, please cite us using the following: 
+If you find our work useful, please cite us using the following:
 ```
 @inproceedings{louis2022sampling,
   title={Sampling Enclosing Subgraphs for Link Prediction},

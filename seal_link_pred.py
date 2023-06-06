@@ -113,7 +113,7 @@ def run_sweal(args, device):
         import networkx as nx
         G = nx.Graph()
         G.add_edges_from(data.edge_index.T.detach().numpy())
-    elif args.dataset in ['USAir', 'NS', 'Power', 'Celegans', 'Router', 'PB', 'Ecoli', 'Yeast']:
+    elif args.dataset in ['USAir', 'NS', 'Power', 'Celegans', 'Router', 'PB', 'Ecoli', 'Yeast', 'DecagonPPI']:
         # We consume the dataset split index as well
         file_name = os.path.join('data', 'link_prediction', args.dataset.lower())
         node_id_mapping = read_label(file_name)
@@ -269,7 +269,7 @@ def run_sweal(args, device):
         rw_kwargs.update({'calc_ratio': True})
 
     if not any([args.train_gae, args.train_mf, args.train_n2v]):
-        print("Setting up Train data")
+        print(f"Setting up Train data, args: {args.pairwise} {args.dynamic_train}")
         dataset_class = 'SEALDynamicDataset' if args.dynamic_train else 'SEALDataset'
         if not args.pairwise:
             # тут SEALDataset
